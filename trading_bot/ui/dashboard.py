@@ -133,20 +133,36 @@ def build_trades_table(trades: List[Trade], n: int = 10) -> Table:
     return tbl
 
 
-def build_signals_table(signals: Dict[str, Signal]) -> Table:
+_REGIME_STYLE = {
+    "BULL":     "[bold green]BULL[/bold green]",
+    "BEAR":     "[bold red]BEAR[/bold red]",
+    "SIDEWAYS": "[yellow]SIDE[/yellow]",
+    "VOLATILE": "[bold magenta]VOLA[/bold magenta]",
+    "UNKNOWN":  "[dim]?[/dim]",
+}
+
+
+def build_signals_table(signals: Dict[str, Signal],
+                        regimes: Optional[dict] = None) -> Table:
     tbl = Table(title="[bold]Latest Signals[/bold]",
                 box=box.SIMPLE_HEAVY, header_style="bold cyan")
     tbl.add_column("Symbol",   style="bold white", no_wrap=True)
+    tbl.add_column("Regime",   justify="center")
     tbl.add_column("Signal",   justify="center")
     tbl.add_column("Strength", justify="right")
     tbl.add_column("Reason",   overflow="fold")
 
     for sym, sig in signals.items():
+        regime_state = (regimes or {}).get(sym)
+        regime_str   = _REGIME_STYLE.get(
+            regime_state.regime.value if regime_state else "UNKNOWN", "[dim]?[/dim]"
+        )
         tbl.add_row(
             sym,
+            regime_str,
             _signal_badge(sig.action),
             f"{sig.strength:.2f}",
-            sig.reason[:70],
+            sig.reason[:60],
         )
     return tbl
 
@@ -182,6 +198,7 @@ def render_dashboard(
     initial:    float,
     tick:       int,
     drawdown:   float,
+    regimes:    Optional[dict] = None,
 ) -> None:
     equity = portfolio.total_equity(prices)
     stats  = portfolio.stats()
@@ -189,7 +206,7 @@ def render_dashboard(
     console.clear()
     console.print(build_header(equity, initial, drawdown, tick))
     console.print(build_positions_table(portfolio, prices))
-    console.print(build_signals_table(signals))
+    console.print(build_signals_table(signals, regimes))
     console.print(build_trades_table(portfolio.trade_log))
     console.print(build_stats_panel(stats))
     console.print(

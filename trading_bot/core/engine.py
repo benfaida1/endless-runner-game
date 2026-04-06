@@ -22,6 +22,8 @@ from trading_bot.data.fetcher import DataFetcher
 from trading_bot.strategies.multi_factor import MultiFactor
 from trading_bot.core.risk_manager import RiskManager
 from trading_bot.core.portfolio import Portfolio
+from trading_bot.core.market_regime import MarketRegimeDetector, Regime
+from trading_bot.core.correlation_filter import CorrelationFilter
 from trading_bot.notifications.telegram import TelegramNotifier
 
 logger = logging.getLogger(__name__)
@@ -52,10 +54,13 @@ class TradingEngine:
         self.risk_mgr  = risk_mgr  or RiskManager(initial_capital=capital)
         self.portfolio = portfolio or Portfolio(initial_capital=capital)
         self.notifier  = TelegramNotifier()
+        self.regime_detector = MarketRegimeDetector()
+        self.corr_filter     = CorrelationFilter(threshold=0.75, lookback=48)
 
         self._running  = False
         self.tick_count = 0
         self._daily_tick = 0   # track when to send daily summary
+        self.regimes: dict = {}  # symbol → RegimeState
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -103,10 +108,18 @@ class TradingEngine:
                 price = float(df["close"].iloc[-1])
                 prices[symbol] = price
 
+                # ── Regime detection ──────────────────────────────────────────
+                regime = self.regime_detector.detect(df, symbol)
+                self.regimes[symbol] = regime
+                self.corr_filter.update(symbol, df["close"])
+
                 # ── Exit check ────────────────────────────────────────────────
                 if symbol in self.risk_mgr.open_symbols:
                     self.risk_mgr.update_trailing_stop(symbol, price)
                     should_exit, exit_reason = self.risk_mgr.should_exit(symbol, price)
+                    # Force exit in BEAR regime
+                    if not should_exit and regime.regime == Regime.BEAR:
+                        should_exit, exit_reason = True, "Regime turned BEAR"
                     if should_exit:
                         self._close(symbol, price, exit_reason)
                         continue
@@ -120,13 +133,31 @@ class TradingEngine:
                     return
 
                 if symbol not in self.risk_mgr.open_symbols:
+                    # Skip longs in BEAR regime
+                    if not regime.allows_long:
+                        logger.debug("[%s] Skipping entry — regime=%s",
+                                     symbol, regime.regime.value)
+                        continue
+
+                    # Correlation check
+                    corr_ok, corr_msg = self.corr_filter.can_open(
+                        symbol, self.risk_mgr.open_symbols
+                    )
+                    if not corr_ok:
+                        logger.debug("[%s] Corr filter: %s", symbol, corr_msg)
+                        continue
+
                     signal = self.strategy.generate_signal(df, symbol)
-                    logger.debug("[%s] %s", symbol, signal)
+                    logger.debug("[%s] %s | regime=%s", symbol, signal,
+                                 regime.regime.value)
 
                     if signal.is_buy:
+                        # Scale strength by regime confidence
+                        adjusted_strength = signal.strength * regime.position_size_multiplier
                         self.notifier.signal_alert(signal)
-                        self._enter(symbol, "buy", price, signal.strength,
-                                    signal.reason, equity)
+                        self._enter(symbol, "buy", price, adjusted_strength,
+                                    signal.reason + f" [{regime.regime.value}]",
+                                    equity)
                     elif signal.is_sell:
                         # Spot-only: skip short entries
                         pass

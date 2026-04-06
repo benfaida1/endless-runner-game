@@ -129,6 +129,46 @@ def run_backtest(symbols: list[str] = None, n_candles: int = 500) -> None:
 
     print_backtest_summary(result)
 
+    # ── Monte Carlo risk analysis ──────────────────────────────────────────────
+    if result.trades and len(result.trades) >= 3:
+        from trading_bot.backtester.monte_carlo import MonteCarloSimulator
+        console.print("\n[cyan]Running Monte Carlo simulation (5,000 paths)…[/cyan]")
+        pnls = [t.pnl for t in result.trades]
+        mc   = MonteCarloSimulator(pnls, settings.INITIAL_CAPITAL, annual_trades=len(pnls))
+        report = mc.run(n_simulations=5_000)
+
+        from rich.table import Table
+        from rich import box as rbox
+        mc_tbl = Table(title="[bold magenta]Monte Carlo Risk Analysis[/bold magenta]",
+                       box=rbox.ROUNDED, show_header=False, padding=(0, 2))
+        mc_tbl.add_column("Metric", style="magenta bold")
+        mc_tbl.add_column("Value",  justify="right")
+
+        ic = settings.INITIAL_CAPITAL
+        def eq_color(v): return "green" if v >= ic else "red"
+
+        mc_tbl.add_row("5th pct equity  (worst case)",
+                       f"[{eq_color(report.final_equity_p5)}]${report.final_equity_p5:,.2f}[/]")
+        mc_tbl.add_row("Median equity",
+                       f"[{eq_color(report.final_equity_p50)}]${report.final_equity_p50:,.2f}[/]")
+        mc_tbl.add_row("95th pct equity (best case)",
+                       f"[green]${report.final_equity_p95:,.2f}[/green]")
+        mc_tbl.add_row("Median max drawdown",
+                       f"[yellow]{report.max_dd_p50*100:.1f}%[/yellow]")
+        mc_tbl.add_row("95th pct max drawdown",
+                       f"[red]{report.max_dd_p95*100:.1f}%[/red]")
+        mc_tbl.add_row("Median CAGR",
+                       f"[{'green' if report.cagr_p50>=0 else 'red'}]"
+                       f"{'+' if report.cagr_p50>=0 else ''}{report.cagr_p50*100:.1f}%[/]")
+        mc_tbl.add_row("P(lose money)",
+                       f"[{'red' if report.prob_loss>0.3 else 'yellow'}]"
+                       f"{report.prob_loss*100:.1f}%[/]")
+        mc_tbl.add_row("P(drawdown > 30%)",
+                       f"[{'red' if report.prob_ruin>0.1 else 'green'}]"
+                       f"{report.prob_ruin*100:.1f}%[/]")
+        console.print(mc_tbl)
+
+    # ── Trade log ─────────────────────────────────────────────────────────────
     if result.trades:
         from rich.table import Table
         from rich import box as rbox
@@ -267,6 +307,7 @@ def run_trading(paper: bool = True, interval: int = 60,
                 initial   = settings.INITIAL_CAPITAL,
                 tick      = tick,
                 drawdown  = state["drawdown"],
+                regimes   = engine.regimes,
             )
 
             if not engine._running:
