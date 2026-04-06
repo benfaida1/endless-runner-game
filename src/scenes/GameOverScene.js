@@ -7,8 +7,15 @@ export default class GameOverScene extends Phaser.Scene {
 
   init(data) {
     this.finalScore = data.score || 0;
-    this.bestScore = parseInt(localStorage.getItem('neonRunnerBest') || '0');
-    this.isNewBest = this.finalScore >= this.bestScore && this.finalScore > 0;
+    // Support both key names for backwards compat; GameScene uses 'neonRunnerHighScore'
+    const stored = parseInt(
+      localStorage.getItem('neonRunnerHighScore') ||
+      localStorage.getItem('neonRunnerBest') || '0', 10
+    );
+    this.bestScore = data.highScore != null ? data.highScore : stored;
+    this.isNewBest = this.finalScore > 0 && this.finalScore >= this.bestScore;
+    // Ensure consistent key
+    localStorage.setItem('neonRunnerHighScore', String(this.bestScore));
   }
 
   create() {

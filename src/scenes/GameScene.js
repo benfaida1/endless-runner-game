@@ -1,544 +1,684 @@
 import Phaser from 'phaser';
 
-const GROUND_Y = 587;   // y position of top of ground
+// ─── Constants ────────────────────────────────────────────────────────────────
+const GAME_WIDTH = 375;
+const GAME_HEIGHT = 667;
+const GROUND_HEIGHT = 80;
+const GROUND_TOP = GAME_HEIGHT - GROUND_HEIGHT;   // y = 587  (top of ground strip)
 const PLAYER_X = 80;
+const BASE_SPEED = 280;
+const SPEED_INCREMENT = 30;
+const MAX_SPEED = 720;
+const JUMP_VELOCITY = -720;
+const DOUBLE_JUMP_VELOCITY = -620;
+
+// Bird heights above ground top
+const BIRD_TIERS = [95, 160, 230];
 
 export default class GameScene extends Phaser.Scene {
   constructor() {
     super({ key: 'GameScene' });
   }
 
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
+
   init() {
-    this.score = 0;
-    this.lives = 3;
-    this.isGameOver = false;
+    this.gameSpeed   = BASE_SPEED;
+    this.score       = 0;
+    this.lives       = 3;
+    this.isAlive     = true;
     this.isInvincible = false;
-    this.jumpCount = 0;
-    this.maxJumps = 2;
-    this.gameSpeed = 280;
-    this.speedIncrement = 20;
-    this.speedTimer = 0;
-    this.combo = 0;
-    this.comboTimer = 0;
-    this.obstacleInterval = 1800;
-    this.coinInterval = 2200;
-    this.distanceSinceLastObstacle = 0;
+    this.jumpCount   = 0;       // 0 = on ground, 1 = first jump, 2 = used double jump
+    this.elapsed     = 0;       // seconds
+    this.lastSpeedUp = 0;       // seconds
+    this.combo       = 0;
+    this.multiplier  = 1;
+    this.comboDecay  = 0;       // ms until combo resets
   }
 
   create() {
-    const { width, height } = this.scale;
+    const W = this.scale.width;
+    const H = this.scale.height;
 
-    // Audio context
-    this.audioCtx = null;
-    try {
-      this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    } catch (e) {}
+    // ── Audio ──
+    this._initAudio();
 
-    // Background
-    this.bg = this.add.tileSprite(width / 2, height / 2, width, height, 'background');
+    // ── Background ──
+    this.bgImage = this.add.image(W / 2, H / 2, 'background').setDisplaySize(W, H).setDepth(0);
 
-    // Clouds
-    this.cloudsGroup = this.add.group();
-    for (let i = 0; i < 5; i++) {
-      const key = i % 2 === 0 ? 'cloud1' : 'cloud2';
-      const c = this.add.image(
-        Phaser.Math.Between(0, width),
-        Phaser.Math.Between(60, 240),
+    // ── Clouds ──
+    this._cloudData = [];
+    ['cloud1', 'cloud2', 'cloud1', 'cloud2', 'cloud1'].forEach((key, i) => {
+      const spr = this.add.image(
+        Phaser.Math.Between(20, W),
+        Phaser.Math.Between(50, 280),
         key
-      ).setAlpha(0.65);
-      this.cloudsGroup.add(c);
-    }
+      ).setAlpha(Phaser.Math.FloatBetween(0.35, 0.65)).setDepth(1);
+      this._cloudData.push({ spr, speed: Phaser.Math.FloatBetween(0.12, 0.35) });
+    });
 
-    // Ground tiles (2 for seamless scrolling)
-    this.ground1 = this.add.tileSprite(width / 2, height - 40, width, 80, 'ground');
-    this.ground2 = this.add.tileSprite(width / 2, height - 40, width, 80, 'ground');
-    this.ground2.x = width * 1.5;
+    // ── Ground ──
+    this.groundTile = this.add.tileSprite(W / 2, GROUND_TOP + GROUND_HEIGHT / 2, W, GROUND_HEIGHT, 'ground').setDepth(3);
 
-    // Physics groups
+    // ── Physics ──
     this.obstacles = this.physics.add.group();
-    this.coins = this.physics.add.group();
 
-    // Player
-    this.player = this.physics.add.sprite(PLAYER_X, GROUND_Y - 50, 'player_run1');
-    this.player.setCollideWorldBounds(false);
-    this.player.body.setSize(30, 44);
-    this.player.body.setOffset(9, 4);
+    // ── Ground collider (static) ──
+    this.groundStatic = this.physics.add.staticGroup();
+    const gBlock = this.groundStatic.create(W / 2, GROUND_TOP + 8, null);
+    gBlock.setVisible(false);
+    gBlock.body.setSize(W * 4, 20);
+    gBlock.refreshBody();
 
-    // Ground collider (invisible static body)
-    this.groundBody = this.physics.add.staticGroup();
-    const groundBlock = this.groundBody.create(width / 2, GROUND_Y + 20, null);
-    groundBlock.setVisible(false);
-    groundBlock.body.setSize(width * 3, 40);
+    // ── Player ──
+    this._createPlayer();
 
-    this.physics.add.collider(this.player, this.groundBody, () => {
-      this.jumpCount = 0;
-    });
-
-    // Particle emitters
-    this.sparkEmitter = this.add.particles(0, 0, 'spark', {
-      speed: { min: 80, max: 200 },
-      angle: { min: -150, max: -30 },
-      scale: { start: 1.2, end: 0 },
-      lifespan: 500,
-      quantity: 0,
-      gravityY: 400,
-      tint: [0xffff00, 0xff8800, 0xff00ff],
-    });
-
-    this.neonEmitter = this.add.particles(0, 0, 'neon_dot', {
-      speed: { min: 60, max: 160 },
-      angle: { min: 0, max: 360 },
-      scale: { start: 1, end: 0 },
-      lifespan: 400,
-      quantity: 0,
-      tint: [0x00ffcc, 0xcc00ff],
-    });
-
-    // Animations
-    this.anims.create({
-      key: 'run',
-      frames: [
-        { key: 'player_run1' },
-        { key: 'player_run2' },
-        { key: 'player_run3' },
-        { key: 'player_run4' },
-      ],
-      frameRate: 10,
-      repeat: -1,
-    });
-    this.anims.create({ key: 'jump', frames: [{ key: 'player_jump' }], frameRate: 1 });
-    this.anims.create({ key: 'hurt', frames: [{ key: 'player_hurt' }], frameRate: 1 });
-
-    this.anims.create({
-      key: 'bird_fly',
-      frames: [{ key: 'bird1' }, { key: 'bird2' }],
-      frameRate: 8,
-      repeat: -1,
-    });
-
-    this.player.play('run');
-
-    // UI
-    this.createUI();
-
-    // Obstacle & coin timers
-    this.obstacleTimer = this.time.addEvent({
-      delay: this.obstacleInterval,
-      loop: true,
-      callback: this.spawnObstacle,
-      callbackScope: this,
-    });
-
-    this.coinTimer = this.time.addEvent({
-      delay: this.coinInterval,
-      loop: true,
-      callback: this.spawnCoin,
-      callbackScope: this,
-    });
-
-    // Speed increase timer
-    this.time.addEvent({
-      delay: 8000,
-      loop: true,
-      callback: () => {
-        this.gameSpeed = Math.min(this.gameSpeed + this.speedIncrement, 700);
-        this.obstacleInterval = Math.max(this.obstacleInterval - 80, 900);
-        this.obstacleTimer.reset({
-          delay: this.obstacleInterval,
-          loop: true,
-          callback: this.spawnObstacle,
-          callbackScope: this,
-        });
-        this.playSound('speedup');
-        this.showFloatingText(this.scale.width / 2, 160, 'SPEED UP!', '#ff6600');
+    // ── Colliders / Overlaps ──
+    this.physics.add.collider(this.player, this.groundStatic, () => {
+      if (this.jumpCount !== 0) {
+        this.jumpCount = 0;
+        if (!this.isInvincible) this.player.play('run');
+        this._spawnLandDust();
       }
     });
 
-    // Input
-    this.jumpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-    this.input.on('pointerdown', this.handleJump, this);
-    this.jumpKey.on('down', this.handleJump, this);
+    this.physics.add.overlap(this.player, this.obstacles, this._onHit, null, this);
 
-    // Mobile jump button
-    const btnSize = 90;
-    this.jumpBtn = this.add.image(
-      this.scale.width - btnSize / 2 - 16,
-      this.scale.height - btnSize / 2 - 16,
-      'jump_button'
-    ).setDisplaySize(btnSize, btnSize).setAlpha(0.8).setInteractive();
-    this.jumpBtn.on('pointerdown', this.handleJump, this);
+    // ── Particles (emitters) ──
+    this._setupParticles();
 
-    // Overlaps
-    this.physics.add.overlap(this.player, this.obstacles, this.hitObstacle, null, this);
-    this.physics.add.overlap(this.player, this.coins, this.collectCoin, null, this);
+    // ── UI ──
+    this._createUI();
 
+    // ── Input ──
+    this._setupInput();
+
+    // ── Timers ──
+    this._obstacleTimer = this.time.addEvent({
+      delay: this._nextObstacleDelay(),
+      callback: this._spawnObstacle,
+      callbackScope: this,
+    });
+
+    this._scoreTimer = this.time.addEvent({
+      delay: 100,
+      loop: true,
+      callback: this._tickScore,
+      callbackScope: this,
+    });
+
+    // ── Fade In ──
     this.cameras.main.fadeIn(300, 0, 0, 0);
   }
 
-  createUI() {
-    const { width } = this.scale;
+  // ─── Audio ────────────────────────────────────────────────────────────────
 
-    // Score
-    this.scoreText = this.add.text(width / 2, 18, '0', {
-      fontFamily: '"Courier New", Courier, monospace',
-      fontSize: '32px',
-      fontStyle: 'bold',
-      color: '#00ffcc',
-      stroke: '#000000',
-      strokeThickness: 3,
-    }).setOrigin(0.5, 0);
-
-    // Distance label
-    this.add.text(width / 2, 52, 'SCORE', {
-      fontFamily: '"Courier New", Courier, monospace',
-      fontSize: '10px',
-      color: '#886699',
-    }).setOrigin(0.5, 0);
-
-    // Hearts
-    this.hearts = [];
-    for (let i = 0; i < 3; i++) {
-      const h = this.add.image(18 + i * 28, 20, 'heart_full').setOrigin(0, 0);
-      this.hearts.push(h);
+  _initAudio() {
+    try {
+      this._ac = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      this._ac = null;
     }
-
-    // Combo text
-    this.comboText = this.add.text(width - 12, 18, '', {
-      fontFamily: '"Courier New", Courier, monospace',
-      fontSize: '16px',
-      color: '#ffcc00',
-      stroke: '#000000',
-      strokeThickness: 2,
-    }).setOrigin(1, 0).setAlpha(0);
-
-    // Speed indicator
-    this.speedText = this.add.text(12, 52, 'SPD: 1x', {
-      fontFamily: '"Courier New", Courier, monospace',
-      fontSize: '10px',
-      color: '#775599',
-    }).setOrigin(0, 0);
   }
 
-  handleJump() {
-    if (this.isGameOver) return;
-    if (this.jumpCount < this.maxJumps) {
-      this.player.setVelocityY(-700);
-      this.jumpCount++;
-      this.player.play('jump');
-      this.playSound('jump');
+  _tone(freq, dur, type = 'square', vol = 0.14, freqEnd = null) {
+    if (!this._ac) return;
+    try {
+      const osc = this._ac.createOscillator();
+      const gain = this._ac.createGain();
+      osc.connect(gain);
+      gain.connect(this._ac.destination);
+      osc.type = type;
+      const t = this._ac.currentTime;
+      osc.frequency.setValueAtTime(freq, t);
+      if (freqEnd) osc.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+      gain.gain.setValueAtTime(vol, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.start(t);
+      osc.stop(t + dur + 0.01);
+    } catch (e) { /* silent */ }
+  }
 
-      // Double jump particle burst
-      if (this.jumpCount === 2) {
-        this.neonEmitter.emitParticleAt(this.player.x, this.player.y + 20, 12);
-        this.playSound('doublejump');
+  _sfxJump()       { this._tone(300, 0.09, 'square', 0.13, 560); }
+  _sfxDoubleJump() {
+    this._tone(420, 0.08, 'sine', 0.13, 700);
+    this.time.delayedCall(70, () => this._tone(800, 0.1, 'sine', 0.1));
+  }
+  _sfxHit() {
+    this._tone(220, 0.05, 'sawtooth', 0.22, 80);
+    this.time.delayedCall(55, () => this._tone(130, 0.12, 'sawtooth', 0.18));
+  }
+  _sfxCoin()     { this._tone(1047, 0.06, 'triangle', 0.1, 1400); }
+  _sfxCombo(n)   { const f = [523,659,784,1047,1319][Math.min(n-1,4)]; this._tone(f, 0.1, 'sine', 0.1); }
+  _sfxSpeedUp()  {
+    [400,600,800].forEach((f,i) => this.time.delayedCall(i*70, () => this._tone(f, 0.08, 'sine', 0.09)));
+  }
+  _sfxGameOver() {
+    [380,300,220,160].forEach((f,i) => this.time.delayedCall(i*130, () => this._tone(f, 0.2, 'sawtooth', 0.2)));
+  }
+
+  // ─── Player ───────────────────────────────────────────────────────────────
+
+  _createPlayer() {
+    const W = this.scale.width;
+    // Start just above ground
+    this.player = this.physics.add.sprite(PLAYER_X, GROUND_TOP - 24, 'player_run1');
+    this.player.setCollideWorldBounds(true);
+    this.player.body.setSize(28, 44);
+    this.player.body.setOffset(10, 4);
+
+    // Define animations (guard against duplicate key errors on scene restart)
+    const anim = (key, frames, rate, repeat) => {
+      if (!this.anims.exists(key)) {
+        this.anims.create({ key, frames: frames.map(k => ({ key: k })), frameRate: rate, repeat });
       }
-    }
+    };
+    anim('run',  ['player_run1','player_run2','player_run3','player_run4'], 10, -1);
+    anim('jump', ['player_jump'], 1, 0);
+    anim('hurt', ['player_hurt'], 1, 0);
+    anim('bird_fly', ['bird1','bird2'], 7, -1);
+
+    this.player.play('run');
   }
 
-  spawnObstacle() {
-    if (this.isGameOver) return;
-    const { width } = this.scale;
-    const type = Phaser.Math.Between(0, 2);
+  // ─── Input ────────────────────────────────────────────────────────────────
 
-    if (type === 0) {
-      // Ground rock
-      const rock = this.obstacles.create(width + 30, GROUND_Y - 26, 'rock');
-      rock.body.allowGravity = false;
-      rock.body.setSize(34, 44);
-      rock.body.setOffset(7, 8);
-      rock.obstacleType = 'rock';
-    } else if (type === 1) {
-      // Low bird (duck to avoid)
-      const bird = this.obstacles.create(width + 30, GROUND_Y - 90, 'bird1');
-      bird.play('bird_fly');
-      bird.body.allowGravity = false;
-      bird.body.setSize(36, 20);
-      bird.body.setOffset(8, 6);
-      bird.obstacleType = 'bird';
-    } else {
-      // High bird (jump to avoid or duck)
-      const bird = this.obstacles.create(width + 30, GROUND_Y - 160, 'bird1');
-      bird.play('bird_fly');
-      bird.body.allowGravity = false;
-      bird.body.setSize(36, 20);
-      bird.body.setOffset(8, 6);
-      bird.obstacleType = 'bird_high';
-    }
-  }
+  _setupInput() {
+    const W = this.scale.width;
+    const H = this.scale.height;
 
-  spawnCoin() {
-    if (this.isGameOver) return;
-    const { width } = this.scale;
-    const yPos = Phaser.Math.Between(GROUND_Y - 160, GROUND_Y - 60);
-    const coin = this.coins.create(width + 20, yPos, 'coin');
-    coin.body.allowGravity = false;
+    // Keyboard
+    this.input.keyboard.on('keydown-SPACE', this._doJump, this);
+    this.input.keyboard.on('keydown-UP',    this._doJump, this);
+    this.input.keyboard.on('keydown-W',     this._doJump, this);
 
-    // Bobbing animation
-    this.tweens.add({
-      targets: coin,
-      y: yPos - 12,
-      duration: 500,
-      yoyo: true,
-      repeat: -1,
-      ease: 'Sine.easeInOut',
+    // Tap anywhere except the jump button zone
+    this.input.on('pointerdown', (ptr) => {
+      const btnX = W - 60, btnY = H - 60;
+      if (Math.hypot(ptr.x - btnX, ptr.y - btnY) > 58) {
+        this._doJump();
+      }
+    });
+
+    // On-screen jump button
+    const btnSz = 90;
+    const jumpBtn = this.add.image(W - 58, H - 58, 'jump_button')
+      .setDisplaySize(btnSz, btnSz)
+      .setAlpha(0.75)
+      .setDepth(20)
+      .setInteractive();
+
+    jumpBtn.on('pointerdown', () => {
+      this._doJump();
+      this.tweens.add({ targets: jumpBtn, scaleX: 0.82, scaleY: 0.82, duration: 70, yoyo: true });
     });
   }
 
-  hitObstacle(player, obstacle) {
-    if (this.isInvincible || this.isGameOver) return;
+  _doJump() {
+    if (!this.isAlive) return;
 
-    // Remove obstacle
-    this.sparkEmitter.emitParticleAt(obstacle.x, obstacle.y, 20);
+    // Resume AudioContext on first user gesture
+    if (this._ac && this._ac.state === 'suspended') this._ac.resume();
+
+    const onGround = this.player.body.blocked.down;
+
+    if (onGround || this.jumpCount === 0) {
+      this.player.setVelocityY(JUMP_VELOCITY);
+      this.jumpCount = 1;
+      this.player.play('jump');
+      this._sfxJump();
+      this._spawnJumpDust();
+    } else if (this.jumpCount === 1) {
+      this.player.setVelocityY(DOUBLE_JUMP_VELOCITY);
+      this.jumpCount = 2;
+      this.player.play('jump');
+      this._sfxDoubleJump();
+      this._spawnDoubleJumpFX();
+    }
+  }
+
+  // ─── Obstacles ────────────────────────────────────────────────────────────
+
+  _nextObstacleDelay() {
+    // Gets shorter as score increases, floor at 850ms
+    return Phaser.Math.Between(
+      Math.max(850, 1700 - this.score * 0.4),
+      Math.max(1100, 2200 - this.score * 0.5)
+    );
+  }
+
+  _spawnObstacle() {
+    if (!this.isAlive) return;
+    const W = this.scale.width;
+    const roll = Phaser.Math.Between(0, 3);
+    if (roll === 0) {
+      this._spawnBird(W + 30);
+    } else {
+      this._spawnRock(W + 30);
+    }
+    // Reschedule
+    this._obstacleTimer = this.time.addEvent({
+      delay: this._nextObstacleDelay(),
+      callback: this._spawnObstacle,
+      callbackScope: this,
+    });
+  }
+
+  _spawnRock(x) {
+    const rock = this.obstacles.create(x, GROUND_TOP - 22, 'rock');
+    rock.body.allowGravity = false;
+    rock.body.setImmovable(true);
+    rock.body.setSize(34, 44);
+    rock.body.setOffset(7, 6);
+    rock.setData('type', 'rock');
+    rock.setData('passed', false);
+    const sc = Phaser.Math.FloatBetween(0.85, 1.25);
+    rock.setScale(sc);
+  }
+
+  _spawnBird(x) {
+    const tier = Phaser.Math.RND.pick(BIRD_TIERS);
+    const y = GROUND_TOP - tier;
+    const bird = this.obstacles.create(x, y, 'bird1');
+    bird.body.allowGravity = false;
+    bird.body.setImmovable(true);
+    bird.body.setSize(36, 18);
+    bird.body.setOffset(8, 7);
+    bird.setData('type', 'bird');
+    bird.setData('passed', false);
+    bird.play('bird_fly');
+  }
+
+  // ─── Collision ────────────────────────────────────────────────────────────
+
+  _onHit(player, obstacle) {
+    if (this.isInvincible || !this.isAlive) return;
+    const ox = obstacle.x, oy = obstacle.y;
     obstacle.destroy();
-
     this.lives--;
-    this.updateHearts();
     this.combo = 0;
-    this.comboText.setAlpha(0);
-    this.playSound('hit');
+    this.multiplier = 1;
+    this._updateComboUI();
+    this._updateHeartsUI();
+    this._sfxHit();
+    this.cameras.main.shake(280, 0.013);
+    this._spawnHitFX(ox, oy);
+    this._spawnHitFX(player.x, player.y);
 
     if (this.lives <= 0) {
-      this.triggerGameOver();
-      return;
-    }
-
-    // Invincibility period
-    this.isInvincible = true;
-    this.player.play('hurt');
-    this.cameras.main.shake(300, 0.015);
-
-    // Flash player
-    let flashCount = 0;
-    const flashTimer = this.time.addEvent({
-      delay: 100,
-      repeat: 10,
-      callback: () => {
-        this.player.setAlpha(this.player.alpha < 1 ? 1 : 0.3);
-        flashCount++;
-        if (flashCount >= 10) {
+      this._gameOver();
+    } else {
+      this.isInvincible = true;
+      this._flashPlayer(14, () => {
+        this.isInvincible = false;
+        if (this.player.active && this.isAlive) {
           this.player.setAlpha(1);
-          this.isInvincible = false;
-          if (!this.player.body.blocked.down) {
-            this.player.play('jump');
-          } else {
-            this.player.play('run');
-          }
+        }
+      });
+    }
+  }
+
+  _flashPlayer(times, onDone) {
+    let count = 0;
+    const ev = this.time.addEvent({
+      delay: 100,
+      repeat: times - 1,
+      callback: () => {
+        count++;
+        if (this.player && this.player.active) {
+          this.player.setAlpha(this.player.alpha < 0.5 ? 1 : 0.15);
+        }
+        if (count >= times) {
+          if (this.player && this.player.active) this.player.setAlpha(1);
+          if (onDone) onDone();
         }
       }
     });
   }
 
-  collectCoin(player, coin) {
-    this.neonEmitter.emitParticleAt(coin.x, coin.y, 8);
-    coin.destroy();
-    this.score += 10 * (1 + Math.floor(this.combo / 5));
+  // ─── Score & Speed ────────────────────────────────────────────────────────
+
+  _tickScore() {
+    if (!this.isAlive) return;
+    this.score += this.multiplier;
+    this._scoreText.setText(String(this.score).padStart(6, '0'));
+
+    // Check near-miss for each obstacle
+    this.obstacles.getChildren().forEach(obs => {
+      if (!obs.getData('passed') && obs.x < PLAYER_X + 5 && obs.x > PLAYER_X - 60) {
+        obs.setData('passed', true);
+        this._onObstaclePassed(obs);
+      }
+    });
+  }
+
+  _onObstaclePassed(obs) {
     this.combo++;
-    this.comboTimer = 3000;
-    this.playSound('coin');
-
-    if (this.combo >= 3) {
-      this.updateComboDisplay();
-    }
-    this.showFloatingText(coin.x, coin.y, '+10', '#ffdd00');
+    this.comboDecay = 4000;
+    this.multiplier = Math.min(1 + Math.floor(this.combo / 2), 6);
+    this._sfxCombo(this.combo);
+    this._updateComboUI();
+    this._showFloating(this.scale.width / 2 + Phaser.Math.Between(-40, 40), 160,
+      this.combo >= 5 ? 'ON FIRE!' : this.combo >= 3 ? `COMBO x${this.combo}` : 'NICE!',
+      ['#ffdd00','#ff8800','#ff4400','#ff00aa','#ff00ff'][Math.min(this.combo-1,4)]
+    );
   }
 
-  updateComboDisplay() {
-    if (this.combo >= 3) {
-      this.comboText.setText(`x${this.combo} COMBO`);
-      this.comboText.setAlpha(1);
-      this.tweens.add({
-        targets: this.comboText,
-        scaleX: 1.2,
-        scaleY: 1.2,
-        duration: 100,
-        yoyo: true,
-      });
+  // ─── UI ───────────────────────────────────────────────────────────────────
+
+  _createUI() {
+    const W = this.scale.width;
+
+    // Score backdrop
+    const sbg = this.add.graphics().setDepth(10);
+    sbg.fillStyle(0x000000, 0.55);
+    sbg.fillRoundedRect(W / 2 - 80, 6, 160, 44, 8);
+
+    this.add.text(W / 2, 12, 'SCORE', {
+      fontFamily: '"Courier New", monospace',
+      fontSize: '10px',
+      color: '#8855aa',
+    }).setOrigin(0.5, 0).setDepth(10);
+
+    this._scoreText = this.add.text(W / 2, 20, '000000', {
+      fontFamily: '"Courier New", monospace',
+      fontSize: '22px',
+      fontStyle: 'bold',
+      color: '#00ffcc',
+      stroke: '#003322',
+      strokeThickness: 2,
+    }).setOrigin(0.5, 0).setDepth(10);
+
+    // Multiplier
+    this._multText = this.add.text(W - 8, 8, 'x1', {
+      fontFamily: '"Courier New", monospace',
+      fontSize: '15px',
+      fontStyle: 'bold',
+      color: '#ffdd00',
+    }).setOrigin(1, 0).setDepth(10);
+
+    // Combo
+    this._comboText = this.add.text(W - 8, 26, '', {
+      fontFamily: '"Courier New", monospace',
+      fontSize: '11px',
+      color: '#ff8800',
+    }).setOrigin(1, 0).setDepth(10);
+
+    // Speed bar
+    this._speedBg = this.add.graphics().setDepth(10);
+    this._speedFill = this.add.graphics().setDepth(10);
+    this._drawSpeedBar();
+
+    // Hearts
+    this._hearts = [];
+    for (let i = 0; i < 3; i++) {
+      const h = this.add.image(14 + i * 26, 14, 'heart_full')
+        .setScale(0.85).setOrigin(0, 0).setDepth(10);
+      this._hearts.push(h);
     }
   }
 
-  updateHearts() {
-    this.hearts.forEach((h, i) => {
-      h.setTexture(i < this.lives ? 'heart_full' : 'heart_empty');
+  _drawSpeedBar() {
+    const W = this.scale.width;
+    const bx = W / 2 - 50, by = 52, bw = 100, bh = 4;
+    const pct = (this.gameSpeed - BASE_SPEED) / (MAX_SPEED - BASE_SPEED);
+    this._speedBg.clear();
+    this._speedBg.fillStyle(0x220033, 0.8);
+    this._speedBg.fillRoundedRect(bx, by, bw, bh, 2);
+    this._speedFill.clear();
+    const c = Phaser.Display.Color.Interpolate.ColorWithColor(
+      Phaser.Display.Color.ValueToColor(0x00ffcc),
+      Phaser.Display.Color.ValueToColor(0xff0044),
+      100, Math.min(100, Math.round(pct * 100))
+    );
+    this._speedFill.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
+    this._speedFill.fillRoundedRect(bx, by, bw * pct, bh, 2);
+  }
+
+  _updateHeartsUI() {
+    this._hearts.forEach((h, i) => h.setTexture(i < this.lives ? 'heart_full' : 'heart_empty'));
+    this.tweens.add({
+      targets: this._hearts,
+      x: (t) => t.x + Phaser.Math.Between(-2, 2),
+      duration: 50, yoyo: true, repeat: 3,
     });
   }
 
-  triggerGameOver() {
-    this.isGameOver = true;
-    this.player.play('hurt');
-    this.player.setVelocityY(-400);
-    this.sparkEmitter.emitParticleAt(this.player.x, this.player.y, 30);
-    this.cameras.main.shake(500, 0.025);
-    this.playSound('gameover');
-
-    // Save high score
-    const best = parseInt(localStorage.getItem('neonRunnerBest') || '0');
-    if (this.score > best) {
-      localStorage.setItem('neonRunnerBest', this.score.toString());
-    }
-
-    this.time.delayedCall(1200, () => {
-      this.cameras.main.fadeOut(400, 0, 0, 0);
-      this.cameras.main.once('camerafadeoutcomplete', () => {
-        this.obstacleTimer.remove();
-        this.coinTimer.remove();
-        this.scene.start('GameOverScene', { score: this.score });
-      });
-    });
+  _updateComboUI() {
+    this._multText.setText('x' + this.multiplier);
+    const cols = ['#ffdd00','#ff8800','#ff4400','#ff0088','#ff00ff','#cc00ff'];
+    this._multText.setColor(cols[Math.min(this.multiplier - 1, cols.length - 1)]);
+    this._comboText.setText(this.combo > 1 ? 'COMBO ' + this.combo : '');
   }
 
-  showFloatingText(x, y, message, color = '#ffffff') {
-    const txt = this.add.text(x, y, message, {
-      fontFamily: '"Courier New", Courier, monospace',
-      fontSize: '18px',
+  _showFloating(x, y, msg, color) {
+    const t = this.add.text(x, y, msg, {
+      fontFamily: '"Courier New", monospace',
+      fontSize: '20px',
       fontStyle: 'bold',
       color,
       stroke: '#000000',
-      strokeThickness: 2,
-    }).setOrigin(0.5);
-
+      strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(20);
     this.tweens.add({
-      targets: txt,
-      y: y - 60,
-      alpha: 0,
-      duration: 900,
-      ease: 'Power2',
-      onComplete: () => txt.destroy(),
+      targets: t,
+      y: y - 55, alpha: 0, scaleX: 1.2, scaleY: 1.2,
+      duration: 850, ease: 'Back.easeOut',
+      onComplete: () => t.destroy(),
     });
   }
 
-  playSound(type) {
-    if (!this.audioCtx) return;
-    try {
-      const osc = this.audioCtx.createOscillator();
-      const gain = this.audioCtx.createGain();
-      osc.connect(gain);
-      gain.connect(this.audioCtx.destination);
+  // ─── Particles / FX ───────────────────────────────────────────────────────
 
-      switch (type) {
-        case 'jump':
-          osc.frequency.setValueAtTime(300, this.audioCtx.currentTime);
-          osc.frequency.exponentialRampToValueAtTime(600, this.audioCtx.currentTime + 0.1);
-          gain.gain.setValueAtTime(0.15, this.audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.2);
-          osc.start();
-          osc.stop(this.audioCtx.currentTime + 0.2);
-          break;
-        case 'doublejump':
-          osc.frequency.setValueAtTime(500, this.audioCtx.currentTime);
-          osc.frequency.exponentialRampToValueAtTime(900, this.audioCtx.currentTime + 0.15);
-          gain.gain.setValueAtTime(0.18, this.audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.25);
-          osc.start();
-          osc.stop(this.audioCtx.currentTime + 0.25);
-          break;
-        case 'coin':
-          osc.type = 'triangle';
-          osc.frequency.setValueAtTime(880, this.audioCtx.currentTime);
-          osc.frequency.setValueAtTime(1200, this.audioCtx.currentTime + 0.05);
-          gain.gain.setValueAtTime(0.12, this.audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.2);
-          osc.start();
-          osc.stop(this.audioCtx.currentTime + 0.2);
-          break;
-        case 'hit':
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(200, this.audioCtx.currentTime);
-          osc.frequency.exponentialRampToValueAtTime(80, this.audioCtx.currentTime + 0.3);
-          gain.gain.setValueAtTime(0.2, this.audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.3);
-          osc.start();
-          osc.stop(this.audioCtx.currentTime + 0.3);
-          break;
-        case 'gameover':
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(400, this.audioCtx.currentTime);
-          osc.frequency.exponentialRampToValueAtTime(60, this.audioCtx.currentTime + 0.8);
-          gain.gain.setValueAtTime(0.25, this.audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.8);
-          osc.start();
-          osc.stop(this.audioCtx.currentTime + 0.8);
-          break;
-        case 'speedup':
-          osc.type = 'square';
-          osc.frequency.setValueAtTime(400, this.audioCtx.currentTime);
-          osc.frequency.linearRampToValueAtTime(800, this.audioCtx.currentTime + 0.15);
-          gain.gain.setValueAtTime(0.1, this.audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.2);
-          osc.start();
-          osc.stop(this.audioCtx.currentTime + 0.2);
-          break;
-      }
-    } catch (e) {}
+  _setupParticles() {
+    // Phaser 3.60+ uses new particle API; keep it simple with manual graphics
+    // (Particle emitters are set up per-burst to avoid API version issues)
   }
 
+  _spawnHitFX(x, y) {
+    const cols = [0xff0044, 0xff6600, 0xffdd00, 0xff00ff, 0xffffff];
+    for (let i = 0; i < 20; i++) {
+      const g = this.add.graphics().setDepth(18);
+      g.fillStyle(cols[i % cols.length], 1);
+      const sz = Phaser.Math.Between(2, 6);
+      g.fillRect(0, 0, sz, sz);
+      g.x = x + Phaser.Math.Between(-8, 8);
+      g.y = y + Phaser.Math.Between(-8, 8);
+      const ang = Phaser.Math.Between(0, 360);
+      const spd = Phaser.Math.Between(50, 200);
+      this.tweens.add({
+        targets: g,
+        x: g.x + Math.cos(Phaser.Math.DegToRad(ang)) * spd * 0.5,
+        y: g.y + Math.sin(Phaser.Math.DegToRad(ang)) * spd * 0.5,
+        alpha: 0, scaleX: 0.1, scaleY: 0.1,
+        duration: Phaser.Math.Between(350, 700),
+        ease: 'Quad.easeOut',
+        onComplete: () => g.destroy(),
+      });
+    }
+    // Flash ring
+    const ring = this.add.graphics().setDepth(19);
+    ring.lineStyle(4, 0xffffff, 0.8);
+    ring.strokeCircle(x, y, 12);
+    this.tweens.add({
+      targets: ring, scaleX: 3, scaleY: 3, alpha: 0, duration: 250,
+      onComplete: () => ring.destroy(),
+    });
+  }
+
+  _spawnJumpDust() {
+    const px = this.player.x, py = this.player.y + 22;
+    for (let i = 0; i < 7; i++) {
+      const g = this.add.graphics().setDepth(5);
+      g.fillStyle(0x9900ff, 0.85);
+      const sz = Phaser.Math.Between(2, 5);
+      g.fillRect(0, 0, sz, sz);
+      g.x = px + Phaser.Math.Between(-14, 14);
+      g.y = py;
+      this.tweens.add({
+        targets: g,
+        x: g.x + Phaser.Math.Between(-22, 22),
+        y: g.y + Phaser.Math.Between(8, 28),
+        alpha: 0, duration: Phaser.Math.Between(200, 400),
+        onComplete: () => g.destroy(),
+      });
+    }
+  }
+
+  _spawnDoubleJumpFX() {
+    const px = this.player.x, py = this.player.y;
+    // Expanding ring
+    const ring = this.add.graphics().setDepth(9);
+    ring.lineStyle(3, 0x00ffcc, 1);
+    ring.strokeCircle(px, py, 8);
+    this.tweens.add({
+      targets: ring, scaleX: 5, scaleY: 5, alpha: 0, duration: 350,
+      onComplete: () => ring.destroy(),
+    });
+    // Radial sparks
+    for (let i = 0; i < 12; i++) {
+      const g = this.add.graphics().setDepth(9);
+      g.fillStyle(0x00ffff, 1);
+      g.fillRect(0, 0, 3, 3);
+      g.x = px; g.y = py;
+      const a = (i / 12) * Math.PI * 2;
+      this.tweens.add({
+        targets: g,
+        x: px + Math.cos(a) * 48,
+        y: py + Math.sin(a) * 48,
+        alpha: 0, duration: 280,
+        onComplete: () => g.destroy(),
+      });
+    }
+  }
+
+  _spawnLandDust() {
+    const px = this.player.x, py = this.player.y + 22;
+    for (let i = 0; i < 9; i++) {
+      const g = this.add.graphics().setDepth(5);
+      g.fillStyle(0x6600cc, 0.9);
+      const sz = Phaser.Math.Between(3, 7);
+      g.fillRect(0, 0, sz, sz);
+      g.x = px + Phaser.Math.Between(-18, 18);
+      g.y = py;
+      this.tweens.add({
+        targets: g,
+        x: g.x + Phaser.Math.Between(-30, 30),
+        y: g.y + Phaser.Math.Between(6, 22),
+        alpha: 0, duration: Phaser.Math.Between(240, 480),
+        onComplete: () => g.destroy(),
+      });
+    }
+  }
+
+  _spawnRunTrail() {
+    const g = this.add.graphics().setDepth(4);
+    g.fillStyle(0x00ffcc, 0.35);
+    g.fillRect(0, 0, 4, 4);
+    g.x = this.player.x - 12;
+    g.y = this.player.y + Phaser.Math.Between(-4, 4);
+    this.tweens.add({
+      targets: g, x: g.x - 18, alpha: 0, duration: 160,
+      onComplete: () => g.destroy(),
+    });
+  }
+
+  // ─── Game Over ────────────────────────────────────────────────────────────
+
+  _gameOver() {
+    this.isAlive = false;
+    this._sfxGameOver();
+
+    if (this._obstacleTimer) this._obstacleTimer.remove();
+    if (this._scoreTimer)    this._scoreTimer.remove();
+
+    // Save high score (use consistent key)
+    const prev = parseInt(localStorage.getItem('neonRunnerHighScore') || '0', 10);
+    const best = Math.max(prev, this.score);
+    localStorage.setItem('neonRunnerHighScore', String(best));
+
+    this.player.play('hurt');
+    this.player.setVelocityY(JUMP_VELOCITY * 0.35);
+
+    this.cameras.main.shake(450, 0.02);
+
+    this._spawnHitFX(this.player.x, this.player.y);
+
+    this.time.delayedCall(1400, () => {
+      this.cameras.main.fadeOut(400, 0, 0, 0);
+      this.cameras.main.once('camerafadeoutcomplete', () => {
+        this.scene.start('GameOverScene', { score: this.score, highScore: best });
+      });
+    });
+  }
+
+  // ─── Update ───────────────────────────────────────────────────────────────
+
   update(time, delta) {
-    if (this.isGameOver) return;
+    if (!this.isAlive) {
+      // Still scroll ground briefly after death for polish
+      if (this.groundTile) this.groundTile.tilePositionX += this.gameSpeed * (delta / 1000) * 0.5;
+      return;
+    }
 
     const dt = delta / 1000;
 
-    // Scroll ground
-    this.ground1.tilePositionX += this.gameSpeed * dt;
-    this.ground2.tilePositionX += this.gameSpeed * dt;
+    // ── Ground scroll ──
+    this.groundTile.tilePositionX += this.gameSpeed * dt;
 
-    // Scroll clouds (slower parallax)
-    this.cloudsGroup.getChildren().forEach(c => {
-      c.x -= 0.4;
-      if (c.x < -100) c.x = this.scale.width + 100;
-    });
-
-    // Score
-    this.score += Math.round(this.gameSpeed * dt * 0.1);
-    this.scoreText.setText(this.score.toString());
-
-    // Speed display
-    const speedLevel = ((this.gameSpeed - 280) / 20 + 1).toFixed(1);
-    this.speedText.setText(`SPD: ${speedLevel}x`);
-
-    // Move obstacles
+    // ── Obstacle movement ──
     this.obstacles.getChildren().forEach(obs => {
       obs.x -= this.gameSpeed * dt;
-      if (obs.x < -80) obs.destroy();
+      if (obs.x < -120) obs.destroy();
     });
 
-    // Move coins
-    this.coins.getChildren().forEach(coin => {
-      coin.x -= (this.gameSpeed * 0.9) * dt;
-      if (coin.x < -30) coin.destroy();
-    });
-
-    // Player animation state
-    if (!this.isInvincible) {
-      if (this.player.body.blocked.down) {
-        if (this.player.anims.currentAnim?.key !== 'run') {
-          this.player.play('run');
-        }
-      } else {
-        if (this.player.anims.currentAnim?.key !== 'jump') {
-          this.player.play('jump');
-        }
+    // ── Cloud parallax ──
+    this._cloudData.forEach(({ spr, speed }) => {
+      spr.x -= speed * this.gameSpeed * dt * 0.2;
+      if (spr.x < -120) {
+        spr.x = this.scale.width + 100;
+        spr.y = Phaser.Math.Between(50, 280);
       }
+    });
+
+    // ── Speed increase every 10 seconds ──
+    this.elapsed += dt;
+    if (this.elapsed - this.lastSpeedUp >= 10) {
+      this.lastSpeedUp = this.elapsed;
+      this.gameSpeed = Math.min(this.gameSpeed + SPEED_INCREMENT, MAX_SPEED);
+      this._sfxSpeedUp();
+      this._showFloating(this.scale.width / 2, 200, 'SPEED UP!', '#00ffff');
     }
 
-    // Combo decay
+    // ── Combo decay ──
     if (this.combo > 0) {
-      this.comboTimer -= delta;
-      if (this.comboTimer <= 0) {
+      this.comboDecay -= delta;
+      if (this.comboDecay <= 0) {
         this.combo = 0;
-        this.tweens.add({
-          targets: this.comboText,
-          alpha: 0,
-          duration: 300,
-        });
+        this.multiplier = 1;
+        this._updateComboUI();
       }
     }
 
-    // Near-miss bonus (when obstacle passes player closely without collision)
-    this.obstacles.getChildren().forEach(obs => {
-      if (!obs.nearMissChecked && obs.x < PLAYER_X - 10 && obs.x > PLAYER_X - 50) {
-        obs.nearMissChecked = true;
-        this.score += 5;
-        this.showFloatingText(PLAYER_X + 30, GROUND_Y - 80, 'CLOSE!', '#ff8800');
+    // ── Speed bar ──
+    this._drawSpeedBar();
+
+    // ── Player tilt on air ──
+    const onGround = this.player.body.blocked.down;
+    if (!onGround) {
+      const vy = this.player.body.velocity.y;
+      this.player.setAngle(vy < 0 ? -10 : 7);
+    } else {
+      this.player.setAngle(0);
+      // Ensure run anim when back on ground and not hurt-flashing
+      if (!this.isInvincible && this.player.anims.currentAnim?.key !== 'run') {
+        this.player.play('run');
       }
-    });
+    }
+
+    // ── Run trail ──
+    if (Phaser.Math.Between(0, 4) === 0) {
+      this._spawnRunTrail();
+    }
   }
 }
