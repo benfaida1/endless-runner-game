@@ -1,0 +1,36 @@
+{
+  "appId": "com.neonrunner.game",
+  "appName": "Neon Runner",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  },
+  "ios": {
+    "contentInset": "automatic",
+    "allowsLinkPreview": false,
+    "scrollEnabled": false
+  },
+  "plugins": {
+    "StatusBar": {
+      "style": "dark",
+      "backgroundColor": "#1a0533",
+      "overlaysWebView": true
+    },
+    "SplashScreen": {
+      "launchShowDuration": 2000,
+      "launchAutoHide": true,
+      "backgroundColor": "#1a0533",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false,
+      "splashFullScreen": true,
+      "splashImmersive": true
+    }
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
