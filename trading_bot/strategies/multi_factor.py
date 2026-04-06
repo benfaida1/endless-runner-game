@@ -18,23 +18,31 @@ from .ma_crossover import MACrossover
 from .rsi_strategy import RSIStrategy
 from .macd_strategy import MACDStrategy
 from .bb_strategy import BBStrategy
+from .vwap_strategy import VWAPStrategy
 from trading_bot.config.settings import STRATEGY_WEIGHTS
+
+# Include VWAP in the default weight map
+_DEFAULT_WEIGHTS = {**STRATEGY_WEIGHTS, "VWAPStrategy": 0.20}
+# Re-normalise so weights sum to 1
+_total = sum(_DEFAULT_WEIGHTS.values())
+_DEFAULT_WEIGHTS = {k: v / _total for k, v in _DEFAULT_WEIGHTS.items()}
 
 
 class MultiFactor(BaseStrategy):
 
-    BUY_THRESHOLD  = 0.35   # weighted score to trigger BUY
-    SELL_THRESHOLD = -0.35  # weighted score to trigger SELL
+    BUY_THRESHOLD  = 0.30   # weighted score to trigger BUY
+    SELL_THRESHOLD = -0.30  # weighted score to trigger SELL
     MIN_AGREEING   = 2      # at least 2 strategies must agree
 
     def __init__(self, weights: Dict[str, float] = None):
         super().__init__("MultiFactor")
-        self.weights = weights or STRATEGY_WEIGHTS
+        self.weights = weights or _DEFAULT_WEIGHTS
         self._strategies: List[BaseStrategy] = [
             MACrossover(),
             RSIStrategy(),
             MACDStrategy(),
             BBStrategy(),
+            VWAPStrategy(),
         ]
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = "") -> Signal:

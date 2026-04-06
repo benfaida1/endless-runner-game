@@ -22,6 +22,7 @@ from trading_bot.data.fetcher import DataFetcher
 from trading_bot.strategies.multi_factor import MultiFactor
 from trading_bot.core.risk_manager import RiskManager
 from trading_bot.core.portfolio import Portfolio
+from trading_bot.notifications.telegram import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,11 @@ class TradingEngine:
         self.strategy  = strategy  or MultiFactor()
         self.risk_mgr  = risk_mgr  or RiskManager(initial_capital=capital)
         self.portfolio = portfolio or Portfolio(initial_capital=capital)
+        self.notifier  = TelegramNotifier()
 
         self._running  = False
         self.tick_count = 0
+        self._daily_tick = 0   # track when to send daily summary
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -112,6 +115,7 @@ class TradingEngine:
                 equity = self.portfolio.total_equity(prices)
                 if self.risk_mgr.check_halt(equity):
                     logger.critical("Bot halted — max drawdown exceeded.")
+                    self.notifier.halt_alert("Max drawdown exceeded", equity)
                     self._running = False
                     return
 
@@ -120,11 +124,12 @@ class TradingEngine:
                     logger.debug("[%s] %s", symbol, signal)
 
                     if signal.is_buy:
+                        self.notifier.signal_alert(signal)
                         self._enter(symbol, "buy", price, signal.strength,
                                     signal.reason, equity)
                     elif signal.is_sell:
-                        # Only short if we support it (paper trading demo)
-                        pass  # Spot-only: skip short entries
+                        # Spot-only: skip short entries
+                        pass
 
             except Exception as exc:
                 logger.warning("Error processing %s: %s", symbol, exc)
@@ -137,6 +142,13 @@ class TradingEngine:
                 "Tick #%d | Equity=%.2f | Positions=%s",
                 self.tick_count, eq, self.risk_mgr.open_symbols,
             )
+            # Daily summary every 24 ticks (≈ 24h at 1h interval)
+            self._daily_tick += 1
+            if self._daily_tick >= 24:
+                self._daily_tick = 0
+                self.notifier.daily_summary(
+                    eq, self.portfolio.initial_capital, self.portfolio.stats()
+                )
 
     # ── Order helpers ─────────────────────────────────────────────────────────
 
@@ -155,10 +167,15 @@ class TradingEngine:
             logger.info("[PAPER] %s %s qty=%.6f @ %.4f | %s",
                         side.upper(), symbol, order.quantity, price, reason)
 
-        self.portfolio.open_position(
+        ok = self.portfolio.open_position(
             symbol, "long" if side == "buy" else "short",
             order.quantity, price, order.stop_loss, order.take_profit,
         )
+        if ok:
+            self.notifier.trade_opened(
+                symbol, side, order.quantity, price,
+                order.stop_loss, order.take_profit, reason,
+            )
 
     def _close(self, symbol: str, price: float, reason: str) -> None:
         if not self.paper:
@@ -171,6 +188,7 @@ class TradingEngine:
             sign = "+" if trade.pnl >= 0 else ""
             logger.info("[CLOSED] %s %s%.2f USDT (%.1f%%) — %s",
                         symbol, sign, trade.pnl, trade.pnl_pct * 100, reason)
+            self.notifier.trade_closed(trade)
 
     # ── State ─────────────────────────────────────────────────────────────────
 

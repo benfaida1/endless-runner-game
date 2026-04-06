@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════╗
-║          CRYPTO TRADING BOT  —  Multi-Factor Edition         ║
-║  Strategies: MA Crossover · RSI · MACD · Bollinger Bands    ║
-║  Features  : Backtesting · Risk Mgmt · Paper Trading        ║
-╚══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║        CRYPTO TRADING BOT  —  Multi-Factor Edition v2           ║
+║  Strategies: MA Crossover · RSI · MACD · Bollinger · VWAP      ║
+║  Features  : Backtesting · Optimizer · Risk Mgmt · Telegram    ║
+╚══════════════════════════════════════════════════════════════════╝
 
 Usage
 ─────
-  python main.py backtest          # Run historical simulation
+  python main.py demo              # Quick signal snapshot
+  python main.py backtest          # Historical simulation + equity chart
+  python main.py optimize          # Grid-search best parameters
   python main.py paper             # Paper trading (live data, fake money)
   python main.py live              # Live trading (requires API keys in .env)
-  python main.py demo              # Quick demo: single signal for each symbol
 """
 
 from __future__ import annotations
@@ -45,10 +46,12 @@ from trading_bot.strategies.ma_crossover import MACrossover
 from trading_bot.strategies.rsi_strategy import RSIStrategy
 from trading_bot.strategies.macd_strategy import MACDStrategy
 from trading_bot.strategies.bb_strategy import BBStrategy
+from trading_bot.strategies.vwap_strategy import VWAPStrategy
 from trading_bot.core.engine import TradingEngine
 from trading_bot.core.portfolio import Portfolio
 from trading_bot.core.risk_manager import RiskManager
 from trading_bot.backtester.engine import Backtester
+from trading_bot.optimizer.grid_search import GridSearchOptimizer, FAST_GRID
 from trading_bot.ui.dashboard import (
     render_dashboard, print_backtest_summary, console
 )
@@ -150,6 +153,76 @@ def run_backtest(symbols: list[str] = None, n_candles: int = 500) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OPTIMIZER MODE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_optimize(symbols: list[str] = None, n_candles: int = 500,
+                 metric: str = "sharpe") -> None:
+    console.rule("[bold magenta]OPTIMIZER — Grid Search[/bold magenta]")
+    symbols = symbols or settings.SYMBOLS[:3]   # keep fast by default
+    fetcher = DataFetcher()
+
+    console.print(f"[cyan]Loading data for {symbols}…[/cyan]")
+    data = {sym: fetcher.fetch_ohlcv(sym, settings.TIMEFRAME, n_candles)
+            for sym in symbols}
+
+    optimizer = GridSearchOptimizer(
+        data    = data,
+        grid    = FAST_GRID,
+        metric  = metric,
+        capital = settings.INITIAL_CAPITAL,
+        top_n   = 5,
+    )
+
+    console.print(f"[cyan]Running grid search (metric={metric})… this may take a minute.[/cyan]\n")
+    results = optimizer.run()
+
+    from rich.table import Table
+    from rich import box as rbox
+
+    tbl = Table(title=f"[bold]Top Results (sorted by {metric})[/bold]",
+                box=rbox.ROUNDED, header_style="bold magenta")
+    tbl.add_column("Rank", justify="right", style="dim")
+    tbl.add_column(metric.capitalize(), justify="right")
+    tbl.add_column("Equity",     justify="right")
+    tbl.add_column("Trades",     justify="right")
+    tbl.add_column("Win Rate",   justify="right")
+    tbl.add_column("Max DD",     justify="right")
+    tbl.add_column("Key Params", overflow="fold")
+
+    for rank, r in enumerate(results, 1):
+        ret_color = "green" if r.equity >= settings.INITIAL_CAPITAL else "red"
+        key_params = (
+            f"ma={r.params.get('ma_fast')}/{r.params.get('ma_slow')} "
+            f"rsi={r.params.get('rsi_period')} "
+            f"sl={r.params.get('stop_loss_pct',0)*100:.0f}% "
+            f"tp={r.params.get('take_profit_pct',0)*100:.0f}%"
+        )
+        tbl.add_row(
+            str(rank),
+            f"{r.metric:.4f}",
+            f"[{ret_color}]${r.equity:,.2f}[/{ret_color}]",
+            str(r.stats.get("total_trades", 0)),
+            f"{r.stats.get('win_rate', 0)*100:.1f}%",
+            f"[red]{r.stats.get('max_drawdown', 0)*100:.1f}%[/red]",
+            key_params,
+        )
+
+    console.print(tbl)
+
+    if results:
+        best = results[0]
+        console.print("\n[bold green]Best parameter set:[/bold green]")
+        for k, v in best.params.items():
+            console.print(f"  [cyan]{k}[/cyan] = {v}")
+
+        console.print(
+            "\n[dim]To use these params, update config/settings.py or pass them "
+            "directly when instantiating strategies.[/dim]"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PAPER / LIVE TRADING MODE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -235,10 +308,11 @@ def main() -> None:
         "mode",
         nargs="?",
         default="demo",
-        choices=["demo", "backtest", "paper", "live"],
+        choices=["demo", "backtest", "optimize", "paper", "live"],
         help=(
             "demo     — show one signal per symbol (default)\n"
-            "backtest — historical simulation with performance report\n"
+            "backtest — historical simulation with equity chart\n"
+            "optimize — grid-search best strategy parameters\n"
             "paper    — live data, simulated orders (no real money)\n"
             "live     — real trading (requires API keys in .env)"
         ),
@@ -246,11 +320,14 @@ def main() -> None:
     parser.add_argument("--symbols",  nargs="+", default=None,
                         help="Override symbol list, e.g. BTC/USDT ETH/USDT")
     parser.add_argument("--candles",  type=int, default=500,
-                        help="Number of candles to load (backtest mode)")
+                        help="Number of candles to load (backtest/optimize)")
     parser.add_argument("--interval", type=int, default=60,
                         help="Seconds between ticks in paper/live mode")
     parser.add_argument("--max-ticks", type=int, default=0,
                         help="Stop after N ticks (0 = run forever)")
+    parser.add_argument("--metric",   default="sharpe",
+                        choices=["sharpe", "return", "profit_factor", "win_rate"],
+                        help="Optimisation objective (default: sharpe)")
 
     args = parser.parse_args()
 
@@ -258,6 +335,8 @@ def main() -> None:
         run_demo()
     elif args.mode == "backtest":
         run_backtest(args.symbols, args.candles)
+    elif args.mode == "optimize":
+        run_optimize(args.symbols, args.candles, args.metric)
     elif args.mode == "paper":
         run_trading(paper=True,  interval=args.interval, max_ticks=args.max_ticks)
     elif args.mode == "live":

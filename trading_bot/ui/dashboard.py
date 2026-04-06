@@ -197,9 +197,65 @@ def render_dashboard(
     )
 
 
+def _ascii_equity_chart(equity_curve: List[float], width: int = 70,
+                         height: int = 14) -> str:
+    """
+    Render a sparkline-style ASCII equity curve using Unicode block characters.
+    Returns a multiline string ready to pass to Rich.
+    """
+    import numpy as np
+
+    if len(equity_curve) < 2:
+        return "(not enough data)"
+
+    # Downsample to `width` points
+    arr = np.array(equity_curve, dtype=float)
+    if len(arr) > width:
+        idx = np.linspace(0, len(arr) - 1, width).astype(int)
+        arr = arr[idx]
+
+    min_v, max_v = arr.min(), arr.max()
+    span = max_v - min_v or 1.0
+
+    # Normalise to [0, height-1]
+    norm = ((arr - min_v) / span * (height - 1)).round().astype(int)
+
+    # Build grid (row 0 = top)
+    grid = [[" "] * len(norm) for _ in range(height)]
+    for col, row_val in enumerate(norm):
+        row = height - 1 - row_val
+        grid[row][col] = "█"
+
+    # Colour each row based on value relative to initial
+    initial = equity_curve[0]
+    final   = equity_curve[-1]
+    up      = final >= initial
+
+    lines = []
+    for r, row in enumerate(grid):
+        # Label y-axis on the left
+        val = max_v - (r / (height - 1)) * span
+        label = f"${val:>10,.0f} │"
+        line  = "".join(row)
+        # Colour: green above start, red below
+        threshold_row = height - 1 - int(((initial - min_v) / span) * (height - 1))
+        if r <= threshold_row:
+            lines.append(f"[dim]{label}[/dim][green]{line}[/green]")
+        else:
+            lines.append(f"[dim]{label}[/dim][red]{line}[/red]")
+
+    # X-axis
+    lines.append(f"[dim]{'─'*12}┴{'─'*len(norm)}[/dim]")
+    n = len(equity_curve)
+    lines.append(f"[dim]{'':>13}0{' ':>{len(norm)//2 - 1}}candle {n}[/dim]")
+
+    return "\n".join(lines)
+
+
 def print_backtest_summary(result) -> None:
-    """Pretty-print backtest results."""
+    """Pretty-print backtest results with equity curve chart."""
     from rich.rule import Rule
+    from rich.columns import Columns
     stats = result.stats
     console.print(Rule("[bold blue]BACKTEST COMPLETE[/bold blue]"))
 
@@ -226,3 +282,9 @@ def print_backtest_summary(result) -> None:
         tbl.add_row(k, v)
 
     console.print(tbl)
+
+    # Equity curve chart
+    if len(result.equity_curve) > 2:
+        chart = _ascii_equity_chart(result.equity_curve, width=65, height=12)
+        console.print(Panel(chart, title="[bold]Equity Curve[/bold]",
+                            box=box.ROUNDED, expand=False))
